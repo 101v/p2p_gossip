@@ -1,11 +1,11 @@
 use primes::is_prime;
 
-#[allow(dead_code)]
-fn find_next_mersenne_prime(earlier_prime: u32) {
+pub(crate) fn find_next_mersenne_prime(earlier_prime: u32) -> u32 {
     let mut p = earlier_prime + 1;
     while !lucas_lehmer_test(p) {
         p += 1;
     }
+    p
 }
 
 fn lucas_lehmer_test(n: u32) -> bool {

@@ -1,9 +1,11 @@
+use serde::Serialize;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
+use crate::mersenne_prime;
 use crate::message::Port;
 
-#[allow(dead_code)]
+#[derive(Serialize)]
 pub struct State {
     name: String,
     port: Port,
@@ -64,6 +66,14 @@ impl State {
 
     pub fn my_port(&self) -> Port {
         self.port
+    }
+
+    pub fn generate_next_mersenne_prime(&mut self) -> u32 {
+        let next_prime = mersenne_prime::find_next_mersenne_prime(self.biggest_prime);
+        self.biggest_prime = next_prime;
+        self.biggest_prime_sender = self.port;
+
+        self.biggest_prime
     }
 }
 

@@ -1,125 +1,87 @@
-use actix_web::{
-    client::Client,
-    get,
-    rt::{spawn, time},
-    App, HttpServer, Responder,
-};
-use backend::{
-    message::{Message, Port},
-    state::State,
-};
-use rand::prelude::SliceRandom;
-use std::{
-    env,
-    fs::read_to_string,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use backend::state::State;
+use std::env;
+use std::sync::mpsc::channel;
+use std::sync::{Arc, RwLock};
 
-fn ensure_valid_port_number(port: Port) {
-    if port < 1024 {
-        panic!("Port number must be >= 1024");
+mod arguments;
+mod scheduled_actions;
+
+use crate::arguments::parse_name_and_number;
+use crate::scheduled_actions::{handler, schedule, Actions};
+
+type ReadState = Arc<RwLock<State>>;
+
+mod handlers {
+    use core::result::Result;
+    use std::convert::Infallible;
+
+    use crate::ReadState;
+
+    pub async fn get_state(state: ReadState) -> Result<impl warp::Reply, Infallible> {
+        let state = state.read().unwrap();
+        Ok(warp::reply::json(&*state))
     }
 }
 
-fn get_names() -> String {
-    read_to_string("names.txt").unwrap()
-}
+mod filters {
+    use super::handlers;
+    use crate::ReadState;
+    use std::convert::Infallible;
+    use warp::Filter;
 
-fn choose_random_name() -> String {
-    get_names()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .choose(&mut rand::thread_rng())
-        .unwrap()
-        .to_string()
-}
+    pub fn get_state(
+        state: ReadState,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path!("state")
+            .and(warp::get())
+            .and(with_state(state))
+            .and_then(handlers::get_state)
+    }
 
-#[allow(dead_code)]
-fn schedule<F>(seconds: u64, state: Arc<Mutex<State>>, f: F)
-where
-    F: 'static + Fn(&mut State),
-{
-    spawn(async move {
-        let mut interval = time::interval(Duration::from_secs(seconds));
-        loop {
-            interval.tick().await;
-            let mut s = state.lock().unwrap();
-            f(&mut s);
-        }
-    });
-}
-
-#[get("/")]
-async fn index() -> impl Responder {
-    "Blockchain node"
-}
-
-fn send_pings_to_everyone(state: &mut State) {
-    for peer in state.get_peers() {
-        futures::executor::block_on(send_message_to(
-            peer,
-            Message::Ping {
-                msg_id: state.get_next_msg_id(),
-                msg_originator: state.my_port(),
-            },
-        ));
+    fn with_state(
+        state: ReadState,
+    ) -> impl Filter<Extract = (ReadState,), Error = Infallible> + Clone {
+        warp::any().map(move || state.clone())
     }
 }
 
-/// Send point-to-point message to a specific peer.
-/// Node specific metadata is automatically added.
-/// You'll be using this function to send messages.
-async fn send_message_to(peer: Port, message: Message) {
-    send(peer, serde_json::to_string(&message).unwrap()).await
-}
-
-async fn send(peer: Port, message: String) {
-    let client = Client::new();
-
-    client
-        .post(format!("http://localhost:{}/receive", peer))
-        .content_type("application/json")
-        .send_body(message)
-        .await
-        .unwrap();
-}
-
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = env::args().collect();
-
-    if args.len() < 2 {
-        panic!("Must pass in port number");
-    }
-
-    let port: Port = args[1].parse().expect("Invalid port number");
-    ensure_valid_port_number(port);
-
-    let name = choose_random_name();
+    let (port, name, peer) = parse_name_and_number(args);
 
     println!("Booting node {} ({})", port, name);
 
     let mut state = State::new(name, port);
 
     // If passed in another peer's port, initialise that peer
-    if args.len() >= 3 {
-        let peer: Port = args[2].parse().expect("Invalid peer port number");
-        ensure_valid_port_number(peer);
-        state.add_peer(peer);
+    if let Some(p) = peer {
+        state.add_peer(p);
     }
 
-    let shared_state = Arc::new(Mutex::new(state));
+    let shared_state = Arc::new(RwLock::new(state));
+
+    let (tx, rx) = channel();
+
+    // println!("Starting handler");
+    tokio::spawn(handler(rx, shared_state.clone()));
 
     // Send a ping to each of our peers once every 5 seconds
-    schedule(5, shared_state.clone(), send_pings_to_everyone);
+    println!("Starting Ping scheduler");
+    schedule(5, Actions::PingEveryone, tx.clone());
 
     // If a peer han't responded to a ping or sent a ping in the last 10 seconds,
     // evict them
-    schedule(2, shared_state.clone(), State::evict_stale_peers);
+    println!("Starting evication scheduler");
+    schedule(2, Actions::EvictStalePeers, tx.clone());
 
-    HttpServer::new(|| App::new().service(index))
-        .bind("127.0.0.1:8080")?
-        .run()
-        .await
+    // Generare and gossip out a Mersenne prime every 10 seconds
+    println!("Starting gossip scheduler");
+    schedule(10, Actions::GossipMersennePrime, tx.clone());
+
+    // let sender = tx.clone();
+
+    println!("Starting web server");
+    let api = filters::get_state(shared_state.clone());
+    warp::serve(api).run(([127, 0, 0, 1], port)).await;
 }

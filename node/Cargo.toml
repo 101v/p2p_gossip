@@ -1,13 +1,16 @@
 [package]
+edition = "2021"
 name = "node"
 version = "0.1.0"
-edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-actix-web = "3"
+backend = {path = "../backend"}
+futures = {version = "0.3.21", features = ["thread-pool"]}
 rand = "0.8.5"
-backend = { path= "../backend"}
+reqwest = {version = "0.11.9", features = ["json"]}
+serde = {version = "1.0.136", features = ["derive"]}
 serde_json = "1.0.59"
-futures = "0.3.21"
+tokio = {version = "1.17.0", features = ["full"]}
+warp = "0.3.2"
