@@ -17,17 +17,11 @@ fn lucas_lehmer_test(n: u32) -> bool {
         return false;
     }
 
-    let m = u32::pow(2, n) - 1;
-    let mut s = 4;
+    let mut s: u64 = 4;
+    let m: u64 = u64::from(u32::pow(2, n) - 1);
 
     for _ in 2..n {
-        let square = s * s;
-        s = (square & m) + (square >> n);
-        if s >= m {
-            s -= m;
-        }
-
-        s -= 2;
+        s = ((s * s) - 2) % m;
     }
 
     return s == 0;
