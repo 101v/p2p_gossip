@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub type Port = u16;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Copy)]
 pub enum Message {
     Prime {
         msg_id: u32,

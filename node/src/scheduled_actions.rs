@@ -1,10 +1,11 @@
 use backend::message::{Message, Port};
 use backend::state::State;
-use std::sync::mpsc::{Receiver, Sender};
+use crossbeam::channel::{Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-fn send_pings_to_everyone(state: &mut State) {
+fn send_pings_to_everyone(state: Arc<RwLock<State>>) {
+    let mut state = state.write().unwrap();
     for peer in state.get_peers() {
         futures::executor::block_on(send_message_to(
             peer,
@@ -16,7 +17,13 @@ fn send_pings_to_everyone(state: &mut State) {
     }
 }
 
-fn generate_and_gosspit_next_mersenne_prime(state: &mut State) {
+fn evict_stale_peers(state: Arc<RwLock<State>>) {
+    let mut state = state.write().unwrap();
+    state.evict_stale_peers();
+}
+
+fn generate_and_gosspit_next_mersenne_prime(state: Arc<RwLock<State>>) {
+    let mut state = state.write().unwrap();
     let my_port = state.my_port();
     let next_prime = state.generate_next_mersenne_prime();
 
@@ -52,22 +59,110 @@ async fn send(peer: Port, message: String) {
         .unwrap();
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Actions {
+#[derive(Clone, Copy)]
+pub enum Actions {
     PingEveryone,
     EvictStalePeers,
     GossipMersennePrime,
+    Respond(Message),
+}
+
+fn checked_and_recorded(
+    msg_id: u32,
+    msg_originator: Port,
+    msg_forwarder: Port,
+    state: Arc<RwLock<State>>,
+) -> bool {
+    let mut state = state.write().unwrap();
+
+    if state.has_seen_message(msg_originator, msg_id) || msg_originator == state.my_port() {
+        return false;
+    }
+    state.record_received_message(msg_originator, msg_id);
+    state.update_last_heard_from(msg_forwarder);
+    true
+}
+
+fn prepare_pong_message(state: Arc<RwLock<State>>) -> Message {
+    let mut state = state.write().unwrap();
+    Message::Pong {
+        msg_originator: state.my_port(),
+        msg_id: state.get_next_msg_id(),
+    }
+}
+
+fn prepare_prime_message(
+    msg_id: u32,
+    ttl: u32,
+    msg_originator: Port,
+    data: u32,
+    state: Arc<RwLock<State>>,
+) -> (Message, Vec<Port>) {
+    let state = state.write().unwrap();
+    (
+        Message::Prime {
+            msg_id,
+            msg_forwarder: state.my_port(),
+            ttl: ttl - 1,
+            msg_originator,
+            data,
+        },
+        state.get_peers(),
+    )
+}
+
+async fn respond(message: Message, state: Arc<RwLock<State>>) {
+    match message {
+        Message::Ping {
+            msg_id,
+            msg_originator,
+        } => {
+            if !checked_and_recorded(msg_id, msg_originator, msg_originator, state.clone()) {
+                return;
+            }
+
+            let pong_message = prepare_pong_message(state);
+            send_message_to(msg_originator, pong_message).await;
+        }
+
+        Message::Pong {
+            msg_id,
+            msg_originator,
+        } => {
+            checked_and_recorded(msg_id, msg_originator, msg_originator, state);
+        }
+
+        Message::Prime {
+            msg_id,
+            ttl,
+            msg_originator,
+            msg_forwarder,
+            data,
+        } => {
+            if !checked_and_recorded(msg_id, msg_originator, msg_forwarder, state.clone()) {
+                return;
+            }
+
+            if ttl > 0 {
+                let (message_to_forward, peers) =
+                    prepare_prime_message(msg_id, ttl, msg_originator, data, state);
+                for peer in peers {
+                    send_message_to(peer, message_to_forward).await;
+                }
+            }
+        }
+    }
 }
 
 pub(crate) async fn handler(rx: Receiver<Actions>, state: Arc<RwLock<State>>) {
     println!("Handler function called");
     while let Ok(action) = rx.recv() {
-        println!("{:#?}", action);
-        let mut s = state.write().unwrap();
+        let state = state.clone();
         match action {
-            Actions::PingEveryone => send_pings_to_everyone(&mut *s),
-            Actions::EvictStalePeers => State::evict_stale_peers(&mut *s),
-            Actions::GossipMersennePrime => generate_and_gosspit_next_mersenne_prime(&mut *s),
+            Actions::PingEveryone => send_pings_to_everyone(state),
+            Actions::EvictStalePeers => evict_stale_peers(state),
+            Actions::GossipMersennePrime => generate_and_gosspit_next_mersenne_prime(state),
+            Actions::Respond(message) => respond(message, state).await,
         }
     }
 }
@@ -77,7 +172,7 @@ pub(crate) fn schedule(seconds: u64, action: Actions, tx: Sender<Actions>) {
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(seconds));
-        println!("Scheduled {:?}", action);
+        // println!("Scheduled {:?}", action);
         loop {
             interval.tick().await;
             tx.send(action).unwrap();

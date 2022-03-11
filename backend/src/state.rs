@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
 use crate::mersenne_prime;
@@ -14,6 +14,7 @@ pub struct State {
     biggest_prime_sender: Port,
     msg_id: u32,
     awake: bool,
+    received_messages: HashSet<(Port, u32)>,
 }
 
 impl State {
@@ -26,11 +27,16 @@ impl State {
             biggest_prime_sender: port,
             msg_id: 0,
             awake: true,
+            received_messages: HashSet::new(),
         }
     }
 
     pub fn add_peer(&mut self, peer: Port) {
         self.peers.insert(peer, SystemTime::now());
+    }
+
+    pub fn update_last_heard_from(&mut self, peer: Port) {
+        self.add_peer(peer);
     }
 
     /// Function that evicts any peers who we haven't heard from in the last 10 seconds.
@@ -74,6 +80,14 @@ impl State {
         self.biggest_prime_sender = self.port;
 
         self.biggest_prime
+    }
+
+    pub fn has_seen_message(&self, msg_originator: Port, msg_id: u32) -> bool {
+        self.received_messages.contains(&(msg_originator, msg_id))
+    }
+
+    pub fn record_received_message(&mut self, msg_originator: Port, msg_id: u32) {
+        self.received_messages.insert((msg_originator, msg_id));
     }
 }
 
