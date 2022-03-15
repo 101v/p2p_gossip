@@ -1,19 +1,32 @@
 use backend::message::{Message, Port};
 use backend::state::State;
 use crossbeam::channel::{Receiver, Sender};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-fn send_pings_to_everyone(state: Arc<RwLock<State>>) {
+fn prepare_ping_messages(state: Arc<RwLock<State>>) -> HashMap<Port, Message> {
     let mut state = state.write().unwrap();
+    let mut messages_to_send = HashMap::new();
+
     for peer in state.get_peers() {
-        futures::executor::block_on(send_message_to(
+        messages_to_send.insert(
             peer,
             Message::Ping {
                 msg_id: state.get_next_msg_id(),
                 msg_originator: state.my_port(),
             },
-        ));
+        );
+    }
+
+    messages_to_send
+}
+
+async fn send_pings_to_everyone(state: Arc<RwLock<State>>) {
+    let messages_to_send = prepare_ping_messages(state);
+
+    for (peer, message) in messages_to_send {
+        send_message_to(peer, message).await;
     }
 }
 
@@ -22,22 +35,29 @@ fn evict_stale_peers(state: Arc<RwLock<State>>) {
     state.evict_stale_peers();
 }
 
-fn generate_and_gosspit_next_mersenne_prime(state: Arc<RwLock<State>>) {
+fn generate_next_prime_message(state: Arc<RwLock<State>>) -> (Vec<Port>, Message) {
     let mut state = state.write().unwrap();
-    let my_port = state.my_port();
-    let next_prime = state.generate_next_mersenne_prime();
+    let msg_originator = state.my_port();
+    let data = state.generate_next_mersenne_prime();
+    let msg_id = state.get_next_msg_id();
 
-    for peer in state.get_peers() {
-        futures::executor::block_on(send_message_to(
-            peer,
-            Message::Prime {
-                msg_id: state.get_next_msg_id(),
-                ttl: 2,
-                msg_originator: my_port,
-                msg_forwarder: my_port,
-                data: next_prime,
-            },
-        ));
+    (
+        state.get_peers(),
+        Message::Prime {
+            msg_id,
+            ttl: 2,
+            msg_originator,
+            msg_forwarder: msg_originator,
+            data,
+        },
+    )
+}
+
+async fn generate_and_gosspit_next_mersenne_prime(state: Arc<RwLock<State>>) {
+    let (peers, message) = generate_next_prime_message(state);
+
+    for peer in peers {
+        send_message_to(peer, message).await;
     }
 }
 
@@ -159,9 +179,9 @@ pub(crate) async fn handler(rx: Receiver<Actions>, state: Arc<RwLock<State>>) {
     while let Ok(action) = rx.recv() {
         let state = state.clone();
         match action {
-            Actions::PingEveryone => send_pings_to_everyone(state),
+            Actions::PingEveryone => send_pings_to_everyone(state).await,
             Actions::EvictStalePeers => evict_stale_peers(state),
-            Actions::GossipMersennePrime => generate_and_gosspit_next_mersenne_prime(state),
+            Actions::GossipMersennePrime => generate_and_gosspit_next_mersenne_prime(state).await,
             Actions::Respond(message) => respond(message, state).await,
         }
     }
